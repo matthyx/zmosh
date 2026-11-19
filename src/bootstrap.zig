@@ -172,17 +172,34 @@ pub fn resolveTargetHost(alloc: std.mem.Allocator, io: std.Io, host: []const u8)
     return try alloc.dupe(u8, clean_host);
 }
 
+pub fn buildRemoteCommand(alloc: std.mem.Allocator, term: []const u8, color: []const u8, session: []const u8) ![:0]u8 {
+    const quoted_term = try quote(alloc, term);
+    defer alloc.free(quoted_term);
+    const quoted_color = try quote(alloc, color);
+    defer alloc.free(quoted_color);
+    const quoted_name = try quote(alloc, session);
+    defer alloc.free(quoted_name);
+    // Wrap in `sh -c` so POSIX syntax and word splitting work regardless of the remote
+    // login shell (e.g. fish, zsh, csh). Append common user/Homebrew binary paths because
+    // non-interactive SSH sessions do not source login profiles.
+    return std.fmt.allocPrintSentinel(
+        alloc,
+        "sh -c 'TERM=$1 COLORTERM=$2 PATH=\"${{PATH:+$PATH:}}/usr/local/bin:/opt/homebrew/bin:$HOME/bin:$HOME/.local/bin\" zmosh serve \"$3\" && {{ set -f; set -- $SSH_CONNECTION; printf \"ZMOSH_ADDRESS %s\\n\" \"$3\"; }}' _ {s} {s} {s}",
+        .{ quoted_term, quoted_color, quoted_name },
+        0,
+    );
+}
+
 pub fn connectRemote(alloc: std.mem.Allocator, io: std.Io, host: []const u8, session: []const u8) !RemoteSession {
     if (host.len == 0 or host[0] == '-' or std.mem.indexOfAny(u8, host, "\x00\r\n") != null) return error.InvalidHost;
-    const term = try quote(alloc, p.getenv("TERM") orelse "xterm-256color");
-    defer alloc.free(term);
-    const color = try quote(alloc, p.getenv("COLORTERM") orelse "");
-    defer alloc.free(color);
-    const name = try quote(alloc, session);
-    defer alloc.free(name);
     // Remote command attempts to report the server address for fallback, but client-side
     // resolution takes precedence for NAT and jump hosts.
-    const command = try std.fmt.allocPrintSentinel(alloc, "TERM={s} COLORTERM={s} PATH=\"$PATH:/usr/local/bin:/opt/homebrew/bin:$HOME/bin:$HOME/.local/bin\" zmosh serve {s} && {{ set -f; set -- $SSH_CONNECTION; printf 'ZMOSH_ADDRESS %s\\n' \"$3\"; }}", .{ term, color, name }, 0);
+    const command = try buildRemoteCommand(
+        alloc,
+        p.getenv("TERM") orelse "xterm-256color",
+        p.getenv("COLORTERM") orelse "",
+        session,
+    );
     defer alloc.free(command);
     const host_z = try alloc.dupeSentinel(u8, host, 0);
     defer alloc.free(host_z);
@@ -420,4 +437,46 @@ test "shell executes quoted hostile values literally" {
     try reap(std.testing.io, pid, deadline);
     var buf: [128]u8 = undefined;
     try std.testing.expectEqualStrings(value, try readRecord(std.testing.io, pipe[0], &buf, deadline));
+}
+
+test "buildRemoteCommand wraps POSIX bootstrap in sh -c and preserves args" {
+    const alloc = std.testing.allocator;
+    const cmd = try buildRemoteCommand(alloc, "ghostty", "truecolor", "my'session $(id)");
+    defer alloc.free(cmd);
+
+    try std.testing.expect(std.mem.startsWith(u8, cmd, "sh -c '"));
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "zmosh",
+        .data = "#!/bin/sh\nprintf 'ARGS:%s|%s|TERM=%s|COLORTERM=%s\\n' \"$1\" \"$2\" \"$TERM\" \"$COLORTERM\"\n",
+        .flags = .{ .permissions = std.Io.File.Permissions.fromMode(0o755) },
+    });
+    const tmp_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(tmp_path);
+    const quoted_tmp = try quote(alloc, tmp_path);
+    defer alloc.free(quoted_tmp);
+
+    const wrapper = try std.fmt.allocPrintSentinel(
+        alloc,
+        "PATH={s}:\"$PATH\" SSH_CONNECTION='192.0.2.1 49634 198.51.100.2 22' {s}",
+        .{ quoted_tmp, cmd },
+        0,
+    );
+    defer alloc.free(wrapper);
+
+    const pipe = try p.pipe2(.{ .CLOEXEC = true });
+    defer p.close(pipe[0]);
+    const argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", wrapper };
+    const pid = try spawn(&argv, pipe[1], false, 64);
+    p.close(pipe[1]);
+    const deadline = now(std.testing.io) + 2000;
+    try reap(std.testing.io, pid, deadline);
+    var buf: [512]u8 = undefined;
+    const output = try readRecord(std.testing.io, pipe[0], &buf, deadline);
+    try std.testing.expectEqualStrings(
+        "ARGS:serve|my'session $(id)|TERM=ghostty|COLORTERM=truecolor\nZMOSH_ADDRESS 198.51.100.2\n",
+        output,
+    );
 }
