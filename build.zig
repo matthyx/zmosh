@@ -17,6 +17,8 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const version = b.option([]const u8, "version", "Version string for release") orelse
         @as([]const u8, build_zig_zon.version);
+    const options = b.addOptions();
+    options.addOption([]const u8, "version", version);
 
     const translate_c = b.dependency("translate_c", .{});
     const translator: Translator = .init(translate_c, .{
@@ -44,6 +46,7 @@ pub fn build(b: *std.Build) void {
     });
     exe_mod.addImport("libzmx", zmx.module("zmx"));
     exe_mod.addImport("zmx", zmx.module("zmx"));
+    exe_mod.addOptions("build_options", options);
 
     const exe = b.addExecutable(.{
         .name = "zmosh",
@@ -151,6 +154,7 @@ pub fn build(b: *std.Build) void {
             });
             release_mod.addImport("libzmx", rel_zmx.module("zmx"));
             release_mod.addImport("zmx", rel_zmx.module("zmx"));
+            release_mod.addOptions("build_options", options);
 
             const release_exe = b.addExecutable(.{
                 .name = "zmosh",

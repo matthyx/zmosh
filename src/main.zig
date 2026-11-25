@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_options = @import("build_options");
 const zmx = @import("libzmx");
 const bootstrap = @import("bootstrap.zig");
 const runtime = @import("runtime.zig");
@@ -49,6 +50,7 @@ fn run(init: std.process.Init, entry_pid: p.pid_t) !void {
     _ = args.next();
     const cmd = args.next() orelse return help();
     if (std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "help")) return help();
+    if (std.mem.eql(u8, cmd, "--version") or std.mem.eql(u8, cmd, "-v") or std.mem.eql(u8, cmd, "version")) return printVersion();
     const is_attach = std.mem.eql(u8, cmd, "attach");
     const worker = std.mem.eql(u8, cmd, "--gateway");
     const is_serve = std.mem.eql(u8, cmd, "serve");
@@ -125,5 +127,9 @@ fn run(init: std.process.Init, entry_pid: p.pid_t) !void {
 }
 
 fn help() !void {
-    _ = try p.write(1, "Usage: zmosh attach <host> <session>\n       zmosh serve <session>\n");
+    _ = try p.write(1, "Usage: zmosh attach <host> <session>\n       zmosh serve <session>\n       zmosh version\n");
+}
+
+fn printVersion() !void {
+    _ = try p.write(1, "zmosh " ++ build_options.version ++ "\n");
 }
